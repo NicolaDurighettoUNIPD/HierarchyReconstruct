@@ -6,44 +6,25 @@ load('valfredda.mat');
 
 %% restructure data and create graph
 
-% definisco le date di cui usare le osservazioni. C'è la funzione che lo fa in base ai dati, oppure si può fare a mano.
+% Definition of observation dates. This function can be used to get dates from available data, or it can be done manually.
 dates = getDates(network);
 % dates = datetime(2020, 01, 01):datetime(2020, 01, 12);
 
+% Node names, used almost only for plots
 nodeId = network.Name;
 
-% matrice di stati osservati: una riga per ogni giorno, una colonna per ogni nodo
+% Matrix of observed states: one row for each day, one column for each node
 statusObs = getStatusMatrix(network, dates);
 
-% trasformo le osservazioni singole in un grafo, in cui il nodo A è connesso al nodo B se c'è un'osservazione in cui
-% abbiamo visto A acceso e B spento (che ci direbbe che A è più persistente di B). Il peso dell'arco che unisce A a B è
-% il numero di osservazioni di A acceso e B spento. Se una (o più) volte è stato visto A spento e B acceso, ci sarà
-% anche un arco diretto da B ad A. Questo grafo è rappresentato da una matrice con N (numero total di nodi) righe ed N
-% colonne, dove nella cella (r,c), dove r è la riga e c la colonna, c'è il numero di osservazioni in cui il nodo r era
-% spento e c acceso.
+% Create the first graph, O. Here, node A is connected to B only if there is an observation of wet A and dry B (i.e. a clue that A is more persistent than B). The weight associated to edge A->B is the number of such observations. There can also be and edge B->A, if there are such observations in the dataset. 
 observationMatrix = getObservationMatrix(statusObs);
 
-% creo un secondo grafo, che descriverà la gerarchia: se abbiamo visto 5 volte A acceso e B spento, e 2 volte A spento e
-% B acceso, in questo grafo ci sarà un collegamento da A a B con peso 3 (cioè il numero netto di volte in cui le
-% osservazoini dicono che A è più persistente di B). Lo stesso tipo di problema può accadere anche con 3 o più nodi: le
-% osservazioni ci dicono che A è più persistente di B (A > B), B > C, ma anche C > A. Questo può capitare quando le
-% diverse coppie di nodi sono state osservate in tempi diversi, e crea dei loop chiusi nel grafo, che danno fastidio.
-% Per questo motivo, identifichiamo tutti i loop e li apriamo eliminando l'arco che pesa meno. In questo modo resta il
-% grafo che identifica la gerarchia andando contro meno osservazioni possibili.
+% Create graph H, describing the hierarcy. Here, loops are removed.
 hierarchyMatrix = getHierarchyMatrix(observationMatrix);
 hierarchyMatrix = removeLoops(hierarchyMatrix);
 hierarchyGraph = digraph(hierarchyMatrix, network);
 
-% [TODO] in caso ci siano troppi loop, usare il parametro MinCycleLength: con un ciclo, partire da loop di lunghezza grande e
-% toglierli, e man mano togliere i loop via via più piccoli fino ad 1.
-
-%% reorder graph topologically
-% riordino i nodi in modo topologico: in questo modo i nodi più persistenti arrivano prima di quelli meno persistenti.
-% Per questa operazione serve che non ci siano loop nel grafo, per questo li abbiamo tolti.
-% Nota: ci possono essere molteplici ordinamenti di nodi che soddisfano tutti i link di gerarchia; a noi ne basta uno
-% qualsiasi perché i nodi che possono scambiarsi posizione tra loro sono quelli che non hanno osservazioni in comune, e
-% quindi non incideranno sul calcolo dell'accuracy.
-% Penso che da questa wiki sia tutto chiaro: https://en.wikipedia.org/wiki/Topological_sorting
+%% Reorder graph topologically
 order = toposort(hierarchyGraph);
 
 network = network(order, :);
@@ -52,56 +33,15 @@ statusObs = statusObs(:, order);
 observationMatrix = observationMatrix(order, order);
 hierarchyMatrix = hierarchyMatrix(order, order);
 
-% ora tutti i nodi sono ordinati secondo la gerarchia.
+%% Check hierarchy accuracy
+% Option 1: calculate the fraction of pairwise observations in accordance with the hierarcy. Since we reordered the matrix, these are all in the lower triangle.
 
-%% check hierarchy accuracy
-% possibilità 1: calcolare la frazione di osservazioni (intese come osservazione di una coppia di nodi, di cui uno
-% spento ed uno acceso) che sono in accordo con la gerarchia. Questo coincide con sommare gli elementi del triangolo
-% superiore di observation matrix diviso la somma totale degli elementi (una volta riordinata la matrice, tutte le
-% osservazoini che seguono la gerarchia stanno nel triangolo superiore, perché i nodi più persistenti stanno prima
-% nell'ordine gerarchico).
-
-% Questo per il paper non lo guardiamo
 hierarchyAccuracy = sum(tril(observationMatrix), 'all') / sum(observationMatrix, 'all');
 
-% possibilità 2: per ogni data (ovvero ogni riga di statusObs), prendere tutte le osservazioni disponibli in statusObs
-% (intese come osservazione di un singolo nodo che può essere acceso o spento). Secondo la gerarchia, i nodi si
-% accendono dal primo in avanti fino ad un certo punto; tutti i nodi dopo saranno spenti. Sarà da far scorrere il numero
-% di nodi accesi da 1 ad N, e per ognuno calcolare la lunghezza "true positive o negative" (per cui lo stato previsto
-% dall'accensione gerarchica è lo stesso dello stato osservato), e trovare il numero di nodi accesi che massimizza
-% questa true length (per la data corrente). Questo simula il trovare la soglia di persistenza che delimita i nodi
-% accesi e spenti, solo che non conosciamo effettivamente le persistenze ma solo la loro gerarchia. In questo modo
-% possiamo costruire una matrice statusHierarchy, analoga a statusObs ma che contiene lo stato previsto dall'accensione
-% gerarchica.
-% NOTA: questo metodo vale solo per calcolare l'accuracy, non per ricostruire lo stato di nodi non osservati in base a
-% quelli osservati. Questo perché l'ordinamento topologico non è univoco nei casi in cui la gerarchia non sia stata
-% osservata.
+% Optrion 2: use the hierarchy to reconstruct the status of the nodes, and calculate the corresponding accuracy in the usual way.
 
-%    [A]      Questi nodi possono essere ordinati come ABCDFE oppure AFBCDE (o anche altri modi). Guardando solo
-%   /  \	  il primo ordinamento, nel caso in cui F sia osservato acceso verrebbe da dare come accesi anche BCD, 
-% [B]  [F]    cosa che però la gerarchia non garantisce (e che non sarebbe vera usando il secondo ordinamento).
-%  |    |     Questo non è un problema nel calcolo dell'accuracy, perché quando abbiamo osservato F non abbiamo
-% [C]   |     osservazioni di BCD (altrimenti esisterebbe una gerarchia tra F e BDC), per cui quando F conta, non
-%  |    |     contano BCD, e viceversa.
-% [D]   |
-%   \  /
-%   [E]
 [statusHierarchy, thresholdValue, thresholdUncertainty] = getStatusHierarchy(network, statusObs);
 
-% Da qui possiamo calcolare 3 accuracy diverse: 
-% - node-wise accuracy: calcolata per ogni % nodo come numero di volte in cui lo stato gerarchico coincide con quello 
-%   osservato, diviso il numero di osservazioni  per quel nodo 
-% - time-wise accuracy: calcolata per ogni data come numero di nodi in cui lo stato gerarchico coincide con quello 
-%   osservato, diviso il numero di nodi osservati in quella data 
-% - total accuracy: calcolata come numero totale di osservazioni giuste  (mettendo insieme tutti i nodi e tutte le 
-%   date) diviso il numero totale di osservazioni.
-
-% questi sono validii se ogni nodo ha la stessa lunghezza
-% nodewiseAccuracy = sum(statusHierarchy == statusObs) ./ sum(~isnan(statusObs));
-% timewiseAccuracy = sum(statusHierarchy == statusObs, 2) ./ sum(~isnan(statusObs), 2);
-% totalAccuracy = sum(statusHierarchy == statusObs, 'all') ./ sum(~isnan(statusObs), 'all');
-
-% in generale
 nodewiseAccuracy = sum(statusHierarchy == statusObs) ./ sum(~isnan(statusObs));
 timewiseAccuracy = (statusHierarchy == statusObs) * network.length ./ (~isnan(statusObs) * network.length);
 totalAccuracy = sum((statusHierarchy == statusObs) * network.length) / sum(~isnan(statusObs) * network.length);
@@ -126,8 +66,8 @@ function dates = getDates(network)
 end
 
 function statusObs = getStatusMatrix(network, dates)
-	% prende i dati dalla mega tabella e li trasforma in matrice
-	% la matrice avrà una riga per ogni data, ed una colonna per ogni nodo (stazione)
+	% Gets data from the provided table and transforms it into matrix form.
+	% One row per day and one column per node.
 	statusObs = NaN(numel(dates), height(network));
 	
 	for s = 1:height(network)
@@ -214,18 +154,18 @@ function H = removeLoops(H)
 end
 
 function [statusHie, thresholds, uncertainty] = getStatusHierarchy(network, statusObs)
-	T = size(statusObs, 2); % numero di nodi, i.e. di possibili soglie
-	N = size(statusObs, 1); % numero di survey
+	T = size(statusObs, 2); % number of nodes, i.e. possible thresholds 
+	N = size(statusObs, 1); % number of surveys
 
 	stretchLength = network.length;
 	
-	errorHie = NaN(N, T); % ogni riga conterrà l'errore per il survey N, al variare della soglia
+	errorHie = NaN(N, T); % each row contains the error relative to survey N, for each possible threshold
 	for threshold = 0:T
 		statusTemp = [true(N, threshold), false(N, T-threshold)];
 		errorHie(:, threshold+1) = (statusTemp ~= statusObs) * stretchLength;
 	end
 
-	% trova il range di threshold associato al minimo errore
+	% find treshold range associated to minimum error
 	thresholdMin = NaN(N, 1);
 	thresholdMax = NaN(N, 1);
 
@@ -239,7 +179,7 @@ function [statusHie, thresholds, uncertainty] = getStatusHierarchy(network, stat
 	thresholds = round((thresholdMin + thresholdMax) / 2);
 	uncertainty = thresholdMax - thresholdMin;
 
-	% ricalcola lo stato dei nodi con il threshold finale
+	% apply selected threshold
 	statusHie = NaN(N, T);
 
 	for n = 1:N
